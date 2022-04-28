@@ -27,3 +27,6 @@ Then click 'Run' on the 'Simulation' tab of the Simulink window and observe the 
 Networks are stored in the workspace inside the Agent class (a), under the names nn(Q-network) and nn_target(target-network). They contain the coefficient values of the learned weights
 
 In case you don't understand something, the comments in the script should clarify most of it
+
+Videos of working solution available at:
+https://drive.google.com/drive/u/0/folders/1O5g08nxvH04vupp59zSW49iqk7uVRX_j
