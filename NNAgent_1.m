@@ -1,0 +1,340 @@
+classdef NNAgent_1 < handle
+    %NNAGENT Agent
+    %   Uses neural network to calculate Q-values.
+    %% OPCJE SIECI
+    
+    properties
+        poss_action
+        discount_factor
+        learning_rate
+        minibatch_size
+        memory_size
+        batch_size
+        numepochs
+        nolayers
+        layers
+        points_divide
+        scale_velocity
+        target_smooth_factor
+        mem
+        nn_target
+        nn
+        simulation_step
+        simulation_time
+        probki
+        rows
+        cols
+        inputs
+    end
+    
+    %% OPCJE AGENTA
+    methods
+        function this = NNAgent_1(opts)
+            
+            % remember parameters
+            this.inputs = opts.inputs;
+            this.discount_factor = opts.discount_factor;
+            this.learning_rate = opts.learning_rate;
+            this.minibatch_size = opts.minibatch_size;
+            this.batch_size = opts.batch_size;
+            this.numepochs = opts.numepochs;
+            this.nolayers = 0;
+            this.layers = opts.layers;
+            this.points_divide = opts.points_divide;
+            this.scale_velocity = opts.scale_velocity;
+            this.target_smooth_factor = opts.target_smooth_factor;
+            this.simulation_step = opts.simulation_step;
+            this.simulation_time = opts.simulation_time;
+            this.memory_size = opts.memory_size;
+            this.probki = this.simulation_time/this.simulation_step;
+            this.poss_action = opts.poss_action;
+            % inicjalizacja pamięci
+            this.rows = this.inputs;
+            this.cols = 1;
+            this.mem = Memory(this.memory_size, [this.rows this.cols]);
+            
+        end
+        %%  NASZ PROCES INTERAKCJI ZE ŚRODOWISKIEM
+        % TRZEBA PRZECHOWYWAĆ INFO O PRESTATE, POSTSTATE i NAGRODZIE
+        % ORAZ ODBYTEJ AKCJI
+        
+        function interakcja(this, sessions, pend, pokazanie, nazwa_sieci, points_treshold)
+            
+            
+            if(pokazanie==0)
+                
+                rng('shuffle');
+                
+                %%%ZAKŁADANIE SIECI
+                hiddenActivationFunctions = {'ReLu','ReLu','linear'};
+                hiddenLayers = this.layers;
+                
+                inputSize = 4;
+                inputActivationFunction = 'linear';
+                
+                %initialise NN params
+                this.nn = paramsNNinit(hiddenLayers, hiddenActivationFunctions);
+                
+                this.nn.epochs = this.numepochs;
+                this.nn.trParams.lrParams.initialLR = this.learning_rate;
+                this.nn.batchsize=this.minibatch_size;
+                
+                % set weight constraints
+                this.nn.weightConstraints.weightPenaltyL1 = 0;
+                this.nn.weightConstraints.weightPenaltyL2 = 0;
+                this.nn.weightConstraints.maxNormConstraint = 4;
+                
+                % show diagnostics to monnitor training
+                this.nn.diagnostics = 1;
+                
+                % show training and validation loss plot
+                this.nn.showPlot = 0;
+                % use bernoulli dropout
+                this.nn.dropoutParams.dropoutType = 0;
+                this.nn.earlyStopping = 0;
+                this.nn.max_fail = 10;
+                
+                this.nn.type = 2;
+                this.nn.trainingMethod = 7;
+                this.nn.weightInitParams.type = 4;
+                
+                [W, biases] = initWeights(inputSize, this.nn.weightInitParams, hiddenLayers, hiddenActivationFunctions);
+                
+                noLayers = length(hiddenLayers);
+                this.nolayers=noLayers;
+                
+                this.nn.W = W;
+                this.nn.biases = biases;
+                
+                %%%KONIEC ZAKŁADANIA SIECI
+                epsilon=1;
+                
+            elseif (pokazanie==1)
+                nazwa  = "savedAgents/" + nazwa_sieci + ".mat";
+                l=load(nazwa); 
+                this.nn=l.g;
+                epsilon=0;
+                
+            end
+            
+            noLayers = length(this.layers);
+            points_results = sessions;
+            Loss= sessions;
+            this.nn_target=this.nn;
+            
+            %WŁAŚCIWA PĘTLA DZIAŁANIA
+            for i = (1:sessions)
+                
+                state1=[0,0];    % stan początkowy ramienia 1 [kąt i prędkość]
+                state2=[0,0];    % stan początkowy ramienia 2 [kąt i prędkość]  
+
+                if(i>=100)
+                    epsilon=0;
+                end
+                
+                %ROZPOCZĘCIE SYMULACJI CO KAZDĄ SESJE UCZĄCĄ
+                
+                simIn = Simulink.SimulationInput('wahadlo');
+                simIn = simIn.setVariable('epsilon',epsilon,'Workspace','wahadlo');
+                simIn = simIn.setVariable('simulation_step',this.simulation_step,'Workspace','wahadlo');
+                simIn = simIn.setVariable('simulation_time',this.simulation_time,'Workspace','wahadlo');
+                simIn = simIn.setVariable('theta1',state1(1),'Workspace','wahadlo');
+                simIn = simIn.setVariable('theta1_dot',state1(2),'Workspace','wahadlo');
+                simIn = simIn.setVariable('theta2',state2(1),'Workspace','wahadlo');
+                simIn = simIn.setVariable('theta2_dot',state2(2),'Workspace','wahadlo');
+                simIn = simIn.setVariable('pend',pend,'Workspace','wahadlo');
+                simIn.applyToModel
+                simOut = sim('wahadlo');
+                
+                epsilon = simOut.epsilon(this.probki);
+                %%%WRZUCENIE DOŚWIADCZEN Z SIMULINKA DO MEOMORY
+                lewo=0;
+                prawo=0;
+                zero=0;
+                points_kat_sum=0;
+                points_predkosc_sum=0;
+                points_akcja_sum=0;
+                for probka=2:this.probki+1
+                    
+                    wyjscie_przed(1)=simOut.kat(probka-1);
+                    wyjscie_przed(2)=simOut.predkosc_katowa(probka-1);
+                    wyjscie_przed(3)=simOut.predkosc_katowa_2(probka-1);
+                    
+                    action=simOut.akcja1(probka-1);
+                    if(simOut.akcja1(probka-1)==0)
+                        zero=zero+1;
+                    elseif(simOut.akcja1(probka-1)==-2)
+                        lewo=lewo+1;
+                    elseif(simOut.akcja1(probka-1)==2)
+                        prawo=prawo+1;
+                    end
+                    wyjscie_po(1) = simOut.kat(probka);
+                    wyjscie_po(2)= simOut.predkosc_katowa(probka);
+                    wyjscie_po(3) = simOut.predkosc_katowa_2(probka);
+                    %funkcja nagrody:
+                    
+                    points_kat = -(wyjscie_przed(1))^2;
+                    points_predkosc = -0.1*(wyjscie_przed(2)^2)/this.scale_velocity;
+                    points_akcja = -0.02*(action)^2;
+                    
+                    points=points_kat + points_predkosc + points_akcja;
+                    
+                    points_kat_sum=points_kat_sum+points_kat;
+                    points_predkosc_sum=points_predkosc_sum+points_predkosc;
+                    points_akcja_sum=points_akcja_sum+points_akcja;
+                    
+                    state_training=[sin(wyjscie_przed(1)),cos(wyjscie_przed(1)),wyjscie_przed(2),wyjscie_przed(3)];
+                    poststate_training=[sin(wyjscie_po(1)),cos(wyjscie_po(1)),wyjscie_po(2),wyjscie_po(3)];
+                    
+                    % dodaj rekord do pamięci
+                    this.mem.add(state_training, action, points/this.points_divide,poststate_training,0);
+                    
+                end
+                
+                %%%%% DODANIE DO KAŻDEJ PRÓBKI JEJ WARTOŚĆI LOSS FUNCTION
+                
+                %                 pamiec=this.mem.allmemory;
+                %                 wejscie_przed=pamiec.prestates;
+                %                 wejscie_po=pamiec.poststates;
+                %
+                %                 y = simulateNN(this.nn,wejscie_przed);
+                %
+                %                 Q_wyjscie = zeros(length(y),1); for g =
+                %                 1:size(y)
+                %                     Q_wyjscie(g,1)=y(g,pamiec.actions(g)/2+2);
+                %                 end
+                %
+                %                 Q_wyjsciepo =
+                %                 simulateNN(this.nn_target,wejscie_po);
+                %                 Q_wyjsciepomax = max(Q_wyjsciepo, [], 2);
+                %
+                %                 for l = 1:size(y)
+                %                     this.mem.Loss(l)=(Q_wyjscie(l)-
+                %                     pamiec.rewards(l) +
+                %                     this.discount_factor *
+                %                     Q_wyjsciepomax(l))^2;
+                %                 end
+                
+                %aktualizacja wag sieci Online (Q)
+                %LOSOWY BATCH
+                L=this.train(this.mem.minibatch2(min(this.mem.size,this.batch_size)));
+                %PRIORYTEZOWANE LOSOWANIE
+                %                 L=this.train(this.mem.minibatch(min(this.mem.size,this.batch_size)));
+                
+                %AKTUALIZACJA SIECI CELU
+                %                 if  mod(i,7)==0
+                %                     this.nn_target=this.nn;
+                %                  end
+                
+                for p = 1 : noLayers
+                    % weights and weight momentum
+                    this.nn_target.W{p} = (1-this.target_smooth_factor)*this.nn_target.W{p}+this.target_smooth_factor*this.nn.W{p};
+                    this.nn_target.biases{p} = (1-this.target_smooth_factor)*this.nn_target.biases{p}+this.target_smooth_factor*this.nn.biases{p};
+                end
+                
+                %ŚREDNIE LOSS Z WSZYSTKICH EPOK
+                sumaL=0;
+                for g=1:this.numepochs
+                    sumaL=sumaL+L(g);
+                end
+                srednieL=sumaL/this.numepochs;
+                pointssum=(points_kat_sum+points_predkosc_sum+points_akcja_sum)*500/this.probki;
+                Loss(i)=srednieL;
+                points_results(i)=pointssum;
+                
+                %wykres wyników nagrody
+                figure (2)
+                t = tiledlayout(2,2,'TileSpacing','Compact','Padding','Compact');
+                nexttile
+                hold on
+                plot ((1:i),points_results,'r');
+                if(i>=5)
+                    sredniepunkty(i)=(points_results(i-4)+points_results(i-3)+points_results(i-2)+points_results(i-1)+points_results(i))/5;
+                else
+                    sredniepunkty(i)=points_results(i);
+                end
+                plot ((1:i),sredniepunkty,'b');
+                set(findall(gca,'-property','FontSize'),'FontSize',15);
+                ylabel('punkty','FontSize',18)
+                grid on
+                grid minor
+                hold off
+                nexttile
+                plot ((1:i),Loss);
+                set(findall(gca,'-property','FontSize'),'FontSize',15);
+                ylabel('średnia strata','FontSize',18)
+                grid on
+                grid minor
+                xlabel(t,'sejse','FontSize',18)
+                   % dwa dolne wykresy mozna zakomentować
+                    nexttile
+                    bar(1:3,[lewo/this.probki*100,zero/this.probki*100,prawo/this.probki*100])
+                    set(findall(gca,'-property','FontSize'),'FontSize',15);
+                    ylabel('akcja','FontSize',18)
+                    set(gca,'XTickLabel',{'-2','0','2'})
+                    nexttile
+                    bar(1:3,[0.5*100*points_kat_sum/pointssum,0.5*100*points_predkosc_sum/pointssum,0.5*100*points_akcja_sum/pointssum])
+                    set(findall(gca,'-property','FontSize'),'FontSize',15);
+                    ylabel('kara','FontSize',18)
+                    set(gca,'XTickLabel',{'za kat','za predkosc','za akcje'})
+                    % koniec 
+                
+%                 set(gcf, 'Position',  [50, 0, 1200, 900]);
+                set(findall(gcf,'type','line'),'linewidth',1);
+                
+                %warunek zakończenia działania
+                if(sredniepunkty(i)>points_treshold)
+                    break;
+                end
+                
+            end
+        end
+        
+        %% FUNKCJA UŻYWANA W SIMULINKU DO PRZYWIDZIANEJ AKCJI
+        function y = calculateaction(this,input)
+            
+            kat=input(1);
+            predkosc_wahadla=input(2);
+            predkosc_ramienia=input(3);
+            % wybór akcji o największym Q-value
+            qvalues = simulateNN(this.nn,[sin(kat),cos(kat),predkosc_wahadla,predkosc_ramienia]);
+            [~, action] = max(qvalues, [], 2);
+            % zmiana z indeksu akcji na jego wartość (-2,0,2)
+            action=action-2;
+            y=action*2;
+            
+        end
+        %%  FUNKCJA UŻYWANA W SIMULINKU DO LOSOWEJ AKCJI
+        function y = randaction(this)
+            y = this.poss_action(randi(numel(this.poss_action)));
+        end
+        %% TRENING
+        function L= train(this, b)
+            % TRAIN Train the network nn with minibatch b and discount_rate.
+            % Parameters:
+            % b - minibatch
+            % Returns trained neural network.
+            
+            % stany wejściowe sieci
+            x = (b.prestates(:,:));
+            xx = (b.poststates(:,:));
+            
+            % przejście sieci dla prestates
+            y = simulateNN(this.nn,x);
+            
+            %  max Q z sieci celu
+            yy = simulateNN(this.nn_target,xx);
+            yymax = max(yy, [], 2);
+            
+            % równanie Bellmana
+            for i = 1:size(y)
+                reward = b.rewards(i);
+                y(i,b.actions(i)/2+2) = reward + this.discount_factor * yymax(i); %niezbędna zamiana indeksu na akcje
+            end
+            
+            % uczenie sieci
+            [this.nn,~,L]=trainNN(this.nn, x, y,[],[]);
+            
+        end
+    end 
+end
